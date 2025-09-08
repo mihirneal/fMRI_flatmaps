@@ -1,6 +1,6 @@
 # fMRI Flat Map Preprocessing Pipeline
 
-This preprocessing pipeline converts BIDS-formatted fMRI data into flat map representations suitable for the fMRI-FM model.
+Preprocessing pipeline for converting BIDS-formatted fMRI data into flat map representations. Worked on by Mihir Tripathy (Baylor College of Medicine) and Claude 4.0 Sonnet.
 
 ## Overview
 
@@ -21,7 +21,7 @@ The pipeline performs these key steps:
 ### Python Dependencies
 Install with:
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Installation
@@ -29,8 +29,8 @@ pip install -r requirements.txt
 1. Ensure FreeSurfer is installed and configured
 2. Install Python dependencies:
    ```bash
-   cd fmri_preprocessing
-   pip install -r requirements.txt
+   cd fMRI_flatmaps
+   uv sync
    ```
 
 ## Usage

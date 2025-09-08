@@ -1,0 +1,1 @@
+"""fMRI preprocessing pipeline for converting BIDS data to flat maps."""

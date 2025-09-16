@@ -10,6 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Optional
+from tqdm import tqdm
 
 # Add current directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -90,6 +91,15 @@ def main():
         action="store_true",
         help="Print what would be processed without actually processing"
     )
+    parser.add_argument(
+        "--disable_detailed_logging",
+        action="store_true",
+        help="Disable detailed step-by-step logging"
+    )
+    parser.add_argument(
+        "--log_dir",
+        help="Directory where per-subject FreeSurfer and pipeline logs will be saved"
+    )
     
     args = parser.parse_args()
     
@@ -111,8 +121,18 @@ def main():
         subjects_dir=subjects_dir,
         target_size=tuple(args.target_size),
         sampling_method=args.sampling_method,
-        freesurfer_home=args.freesurfer_home
+        freesurfer_home=args.freesurfer_home,
+        enable_detailed_logging=not args.disable_detailed_logging,
+        log_dir=args.log_dir
     )
+    
+    # Load historical timing data if available
+    timing_file = output_dir / "processing_times.json"
+    if timing_file.exists():
+        print(f"Loading historical timing data from {timing_file}")
+        generator.load_historical_times(timing_file)
+    else:
+        print("No historical timing data found - will use default estimates")
     
     print("Initializing WebDataset packager...")
     packager = WebDatasetPackager(
@@ -171,36 +191,73 @@ def main():
             print("Cancelled by user")
             return
     
-    # Process subjects
+    # Process subjects with progress tracking
     all_samples = []
     
-    for i, subject_id in enumerate(subjects_to_process):
-        print(f"\\n=== Processing subject {i+1}/{len(subjects_to_process)}: {subject_id} ===")
-        
-        try:
-            subject = bids_loader.get_subject(subject_id)
-            samples = generator.process_subject_all_runs(
-                subject, 
-                task=args.task,
-                run_freesurfer=not args.skip_freesurfer
-            )
+    # Get progress bar configuration
+    progress_config = generator.get_progress_bar_config(len(subjects_to_process), avg_runs_per_subject)
+    
+    # Calculate total functional runs for progress tracking
+    total_runs_processed = 0
+    with tqdm(**progress_config) as pbar:
+        for i, subject_id in enumerate(subjects_to_process):
+            if not args.disable_detailed_logging:
+                print(f"\\n{'='*80}")
+                print(f"SUBJECT {i+1}/{len(subjects_to_process)}: {subject_id}")
+                print(f"{'='*80}")
+            else:
+                pbar.set_description(f"Processing {subject_id}")
             
-            all_samples.extend(samples)
-            print(f"Generated {len(samples)} samples for {subject_id}")
-            
-        except Exception as e:
-            print(f"Error processing {subject_id}: {e}")
-            continue
+            try:
+                subject = bids_loader.get_subject(subject_id)
+                samples = generator.process_subject_all_runs(
+                    subject, 
+                    task=args.task,
+                    run_freesurfer=not args.skip_freesurfer
+                )
+                
+                all_samples.extend(samples)
+                runs_in_subject = len(samples)
+                total_runs_processed += runs_in_subject
+                
+                # Update progress bar by the number of runs processed
+                pbar.update(runs_in_subject)
+                pbar.set_postfix({
+                    'subject': subject_id,
+                    'runs': runs_in_subject,
+                    'total_samples': len(all_samples)
+                })
+                
+                if not args.disable_detailed_logging:
+                    print(f"\\n✅ Subject {subject_id} completed: {runs_in_subject} functional runs processed")
+                
+            except Exception as e:
+                print(f"❌ Error processing {subject_id}: {e}")
+                # Still need to update progress bar even on error
+                subject_obj = bids_loader.get_subject(subject_id)
+                expected_runs = len(subject_obj.get_functional_files(task=args.task))
+                pbar.update(expected_runs)
+                continue
     
     # Package into WebDataset
     if all_samples:
-        print(f"\\n=== Packaging {len(all_samples)} samples into WebDataset ===")
-        shard_files = packager.package_samples(all_samples, args.dataset_name)
+        print(f"\\n{'='*80}")
+        print(f"PACKAGING {len(all_samples)} samples into WebDataset")
+        print(f"{'='*80}")
         
-        # Validate shards
+        # Show progress for packaging as well
+        with tqdm(total=len(all_samples), desc="Packaging samples", unit="sample") as pbar:
+            def progress_callback(completed):
+                pbar.update(completed - pbar.n)
+            
+            shard_files = packager.package_samples(all_samples, args.dataset_name, progress_callback)
+        
+        # Validate shards with progress
         print("\\nValidating created shards...")
-        for shard_file in shard_files:
-            packager.validate_shard(shard_file)
+        with tqdm(shard_files, desc="Validating shards", unit="shard") as pbar:
+            for shard_file in pbar:
+                pbar.set_postfix({'file': shard_file.name})
+                packager.validate_shard(shard_file)
         
         # Print statistics
         stats = packager.get_dataset_stats(shard_files)
@@ -217,6 +274,28 @@ def main():
         
     else:
         print("\\nNo samples generated. Check for errors above.")
+    
+    # Save updated timing data for future runs
+    if not args.disable_detailed_logging:
+        print(f"\\nSaving timing data for future estimates...")
+        generator.save_historical_times(timing_file)
+        
+        # Show processing statistics if we have data
+        stats = generator.get_processing_statistics()
+        if 'message' not in stats:
+            print(f"\\n{'='*60}")
+            print("PROCESSING STATISTICS")
+            print(f"{'='*60}")
+            
+            for step, step_stats in stats.items():
+                if step != 'summary' and isinstance(step_stats, dict):
+                    print(f"{step:<25} {step_stats['mean_time']:>8.2f}s ± {step_stats['std_time']:>6.2f}s (n={step_stats['n_samples']})")
+            
+            summary = stats['summary']
+            print(f"\\nMost time-consuming step: {summary['most_time_consuming_step']}")
+            print(f"Average total time per run: {summary['total_mean_time_per_run']:.2f}s")
+            print(f"Historical sessions: {summary['total_processing_sessions']}")
+            print(f"{'='*60}")
 
 
 if __name__ == "__main__":
